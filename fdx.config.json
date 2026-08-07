@@ -1,0 +1,12 @@
+{
+  "commands": {
+    "lint": {"run": "bin/lint"},
+    "format": {"run": "bin/lint"},
+    "test": {"run": "bin/test"}
+  },
+  "tests": {
+    "language_suites": {
+      "ruby": "bin/coverage"
+    }
+  }
+}
