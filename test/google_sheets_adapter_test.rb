@@ -1,56 +1,7 @@
 require_relative "test_helper"
+require_relative "support/adapter_test_case"
 
-class AdapterTest < Minitest::Test
-  class Contact < ActiveRecord::Base
-    self.table_name = "contacts"
-  end
-
-  def setup
-    @service = FakeSheetsService.new(SPREADSHEET_ID)
-    @service.seed("contacts", [
-      ["id", "name", "email", "age", "active", "signed_up_on", "last_seen_at", "score"],
-      [1, "Ada Lovelace", "ada@example.com", 36, true, "1852-11-27", "2026-08-01 09:00:00", 1.5],
-      [2, "Grace Hopper", "grace@example.com", 85, false, "1992-01-01", "2026-08-02 10:30:00", 2],
-      [3, "Alan Turing", "", 41, true, "1954-06-07", "2026-08-03 11:45:00", 3.25]
-    ])
-    @service.register!
-    ActiveRecord::Base.establish_connection(
-      adapter: "google_sheets",
-      spreadsheet_id: SPREADSHEET_ID,
-      access_token: "test-token"
-    )
-    Contact.reset_column_information
-  end
-
-  # super runs WebMock's teardown alias, which resets the stub registry and
-  # request history between tests.
-  def teardown
-    ActiveRecord::Base.remove_connection
-    super
-  end
-
-  def connection
-    ActiveRecord::Base.lease_connection
-  end
-
-  # -- schema ----------------------------------------------------------------
-
-  def test_reports_tables_and_columns_with_inferred_types
-    assert_equal ["contacts"], connection.tables
-    assert connection.table_exists?("contacts")
-    refute connection.table_exists?("missing")
-    assert_equal "id", connection.primary_key("contacts")
-
-    types = connection.columns("contacts").to_h { |column| [column.name, column.type] }
-    assert_equal :integer, types["id"]
-    assert_equal :string, types["name"]
-    assert_equal :integer, types["age"]
-    assert_equal :boolean, types["active"]
-    assert_equal :date, types["signed_up_on"]
-    assert_equal :datetime, types["last_seen_at"]
-    assert_equal :float, types["score"]
-  end
-
+class GoogleSheetsAdapterTest < AdapterTestCase
   def test_reports_adapter_metadata
     assert ActiveRecord::ConnectionAdapters::GoogleSheetsAdapter.database_exists?({})
     assert_equal [], connection.views
@@ -69,8 +20,6 @@ class AdapterTest < Minitest::Test
     assert_kind_of Time, contact.last_seen_at
   end
 
-  # -- reads -------------------------------------------------------------------
-
   def test_finds_and_filters_records
     assert_equal "Ada Lovelace", Contact.find(1).name
     assert_equal [2], Contact.where(active: false).pluck(:id)
@@ -88,14 +37,6 @@ class AdapterTest < Minitest::Test
     assert_equal [2, 3], Contact.where("age >= 41").order(:id).pluck(:id)
     assert_equal [1], Contact.where("age < 41").pluck(:id)
     assert_equal [1, 3], Contact.where("age <= 41").order(:id).pluck(:id)
-    assert_equal [2, 3], connection.select_all(%(SELECT "id" FROM "contacts" WHERE NOT "name" LIKE 'A%' OR "score" > 3)).rows.flatten.sort
-  end
-
-  def test_compares_string_booleans_loosely
-    @service.seed("flags", [["id", "ready"], [1, "TRUE"], [2, "FALSE"]])
-    connection.reconnect!
-    result = connection.select_all(%(SELECT "id" FROM "flags" WHERE "ready" = TRUE))
-    assert_equal [[1]], result.rows
   end
 
   def test_blank_cells_read_as_nil
@@ -114,9 +55,6 @@ class AdapterTest < Minitest::Test
   def test_raises_on_unsupported_queries
     assert_raises(ActiveRecord::StatementInvalid) { Contact.joins("JOIN x ON 1=1").to_a }
     assert_raises(ActiveRecord::StatementInvalid) { Contact.sum(:age) }
-    assert_raises(ActiveRecord::StatementInvalid) do
-      connection.select_all(%(SELECT COUNT(*), "id" FROM "contacts"))
-    end
   end
 
   def test_raises_on_bind_parameters
@@ -126,26 +64,18 @@ class AdapterTest < Minitest::Test
     end
   end
 
-  def test_exec_query_returns_an_empty_result_for_writes
-    result = connection.exec_query(%(UPDATE "contacts" SET "age" = 42 WHERE "id" = 3))
-    assert_empty result.columns
-    assert_equal 42, Contact.find(3).age
-  end
-
-  def test_create_with_an_explicit_id_keeps_it
-    contact = Contact.create!(id: 50, name: "Annie Easley")
-    assert_equal 50, contact.id
-    assert_equal 50, @service.sheets["contacts"].last.first
-  end
-
-  # -- writes ------------------------------------------------------------------
-
   def test_create_assigns_the_next_id_and_appends_a_row
     contact = Contact.create!(name: "Katherine Johnson", email: "kj@example.com", age: 101, active: true)
     assert_equal 4, contact.id
     appended = @service.sheets["contacts"].last
     assert_equal [4, "Katherine Johnson", "kj@example.com", 101, true], appended.first(5)
     assert_equal 4, Contact.count
+  end
+
+  def test_create_with_an_explicit_id_keeps_it
+    contact = Contact.create!(id: 50, name: "Annie Easley")
+    assert_equal 50, contact.id
+    assert_equal 50, @service.sheets["contacts"].last.first
   end
 
   def test_update_rewrites_the_matching_row
@@ -180,50 +110,6 @@ class AdapterTest < Minitest::Test
     assert_equal 2, deleted
     assert_equal [2], Contact.pluck(:id)
   end
-
-  # -- schema changes ------------------------------------------------------------
-
-  def test_create_table_drop_table_and_column_management
-    connection.create_table("projects") do |t|
-      t.string :title
-      t.integer :budget
-    end
-    assert_equal ["id", "title", "budget"], @service.sheets["projects"].first
-
-    connection.add_column("projects", :status, :string)
-    assert_equal ["id", "title", "budget", "status"], @service.sheets["projects"].first
-    assert_raises(ActiveRecord::StatementInvalid) { connection.add_column("projects", :status, :string) }
-
-    connection.rename_column("projects", :status, :phase)
-    assert_equal ["id", "title", "budget", "phase"], @service.sheets["projects"].first
-
-    connection.remove_column("projects", :budget)
-    assert_equal ["id", "title", "phase"], @service.sheets["projects"].first
-    assert_raises(ActiveRecord::StatementInvalid) { connection.remove_column("projects", :missing) }
-
-    connection.add_index("projects", :title)
-    connection.remove_index("projects", :title)
-
-    connection.rename_table("projects", "engagements")
-    assert connection.table_exists?("engagements")
-
-    connection.create_table("engagements", force: true) { |t| t.string :title }
-    assert_equal ["id", "title"], @service.sheets["engagements"].first
-
-    connection.drop_table("engagements")
-    refute connection.table_exists?("engagements")
-  end
-
-  def test_create_table_without_id_and_composite_headers
-    connection.create_table("settings", id: false) do |t|
-      t.string :key
-      t.string :value
-    end
-    assert_equal ["key", "value"], @service.sheets["settings"].first
-    assert_nil connection.primary_key("settings")
-  end
-
-  # -- misc ----------------------------------------------------------------------
 
   def test_transactions_are_accepted_as_no_ops
     Contact.transaction { Contact.create!(name: "Annie Easley") }

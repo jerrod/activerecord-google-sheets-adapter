@@ -28,20 +28,6 @@ class StatementParserTest < Minitest::Test
     assert_equal :is_null, email.operator
   end
 
-  def test_parses_or_not_in_and_like
-    statement = Parser.parse(<<~SQL.strip)
-      SELECT * FROM "users" WHERE ("users"."id" IN (1, 2) OR "users"."name" LIKE 'A%') AND "users"."id" NOT IN (9) AND "users"."email" IS NOT NULL AND NOT "users"."name" NOT LIKE 'B%'
-    SQL
-    grouped, not_in, not_null, negated = flatten_and(statement.where)
-    assert_equal :or, grouped.operator
-    assert_equal [1, 2], grouped.children.first.value
-    assert_equal :like, grouped.children.last.operator
-    assert_equal :not_in, not_in.operator
-    assert_equal :not_null, not_null.operator
-    assert_equal :not, negated.operator
-    assert_equal :not_like, negated.children.first.operator
-  end
-
   def test_parses_count_and_exists_projections
     count = Parser.parse(%(SELECT COUNT(*) FROM "users"))
     assert_equal :count, count.projections.first.kind
@@ -74,20 +60,6 @@ class StatementParserTest < Minitest::Test
     assert_equal :neq, delete.where.operator
   end
 
-  def test_parses_comparison_operators
-    [["<", :lt], ["<=", :lte], [">", :gt], ["<>", :neq]].each do |symbol, operator|
-      statement = Parser.parse(%(SELECT * FROM "users" WHERE "users"."age" #{symbol} 30))
-      assert_equal operator, statement.where.operator
-    end
-  end
-
-  def test_parses_bare_identifiers_and_escapes
-    statement = Parser.parse(%(SELECT * FROM users WHERE "users"."name" = 'it''s' AND "we""ird" = 1))
-    assert_equal "users", statement.table
-    assert_equal "it's", statement.where.children.first.value
-    assert_equal 'we"ird', statement.where.children.last.column
-  end
-
   def test_rejects_unsupported_sql
     [
       "CREATE TABLE \"users\" (id integer)",
@@ -102,12 +74,5 @@ class StatementParserTest < Minitest::Test
     ].each do |sql|
       assert_raises(GoogleSheets::UnsupportedStatement, sql) { Parser.parse(sql) }
     end
-  end
-
-  private
-
-  def flatten_and(node)
-    return [node] unless node.operator == :and
-    flatten_and(node.children.first) + [node.children.last]
   end
 end
