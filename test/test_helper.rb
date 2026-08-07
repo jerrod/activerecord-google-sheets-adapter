@@ -1,3 +1,7 @@
+# WebMock's stub registry and request history are process-global, so the
+# suite must run serially. Set before minitest loads and sizes its executor.
+ENV["MT_CPU"] = "1"
+
 if ENV["COVERAGE"]
   require "simplecov"
   SimpleCov.start do

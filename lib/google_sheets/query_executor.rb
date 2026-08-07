@@ -19,6 +19,7 @@ module GoogleSheets
     end
 
     def execute(sql)
+      @like_patterns = {}
       statement = StatementParser.parse(sql)
       case statement
       when StatementParser::Select then execute_select(statement)
@@ -85,16 +86,38 @@ module GoogleSheets
       QueryResult.new(columns: columns, rows: rows)
     end
 
+    # Parses each sort value once up front, then compares the precomputed keys,
+    # so a sort never re-parses a numeric string per pairwise comparison.
     def apply_order(records, orderings)
       return records if orderings.empty?
-      records.sort do |left, right|
+      keyed = records.map do |record|
+        keys = orderings.map { |ordering| sort_key(record.attributes[ordering.column]) }
+        [keys, record]
+      end
+      keyed.sort do |(left_keys, _), (right_keys, _)|
         comparison = 0
-        orderings.each do |ordering|
-          comparison = compare_values(left.attributes[ordering.column], right.attributes[ordering.column])
+        orderings.each_with_index do |ordering, index|
+          comparison = compare_keys(left_keys[index], right_keys[index])
           comparison = -comparison if ordering.descending
           break unless comparison.zero?
         end
         comparison
+      end.map(&:last)
+    end
+
+    def sort_key(value)
+      return nil if value.nil?
+      numeric(value) || value.to_s
+    end
+
+    def compare_keys(left, right)
+      return 0 if left.nil? && right.nil?
+      return -1 if left.nil?
+      return 1 if right.nil?
+      if left.is_a?(Numeric) && right.is_a?(Numeric)
+        left <=> right
+      else
+        left.to_s <=> right.to_s
       end
     end
 
@@ -102,8 +125,10 @@ module GoogleSheets
 
     def execute_insert(statement)
       headers, records = load_records(statement.table)
+      unknown = statement.columns - headers
+      raise UnsupportedStatement, "unknown columns #{unknown.inspect} for sheet #{statement.table}" if unknown.any?
       last_insert_id = nil
-      statement.rows.each do |values|
+      new_rows = statement.rows.map do |values|
         attributes = statement.columns.zip(values).to_h
         if headers.include?("id") && !attributes.key?("id")
           last_insert_id = next_id(records)
@@ -112,10 +137,9 @@ module GoogleSheets
         elsif attributes.key?("id")
           last_insert_id = attributes["id"]
         end
-        unknown = attributes.keys - headers
-        raise UnsupportedStatement, "unknown columns #{unknown.inspect} for sheet #{statement.table}" if unknown.any?
-        @client.append_row(statement.table, headers.map { |header| write_value(attributes.fetch(header, nil)) })
+        headers.map { |header| write_value(attributes.fetch(header, nil)) }
       end
+      @client.append_rows(statement.table, new_rows)
       QueryResult.new(affected_count: statement.rows.length, last_insert_id: last_insert_id)
     end
 
@@ -128,10 +152,11 @@ module GoogleSheets
     def execute_update(statement)
       headers, records = load_records(statement.table)
       matched = records.select { |record| matches?(record.attributes, statement.where) }
-      matched.each do |record|
+      rows_by_number = matched.to_h do |record|
         attributes = record.attributes.merge(statement.assignments)
-        @client.update_row(statement.table, record.row_number, headers.map { |header| write_value(attributes[header]) })
+        [record.row_number, headers.map { |header| write_value(attributes[header]) }]
       end
+      @client.update_rows(statement.table, rows_by_number) if rows_by_number.any?
       QueryResult.new(affected_count: matched.length)
     end
 
@@ -200,9 +225,13 @@ module GoogleSheets
       end
     end
 
+    # The compiled pattern is cached per statement, so an N-row scan compiles
+    # each LIKE pattern once instead of once per row.
     def like?(cell, pattern)
       return false if cell.nil? || pattern.nil?
-      regex = Regexp.new("\\A#{Regexp.escape(pattern.to_s).gsub("%", ".*").tr("_", ".")}\\z", Regexp::IGNORECASE)
+      regex = @like_patterns[pattern] ||= Regexp.new(
+        "\\A#{Regexp.escape(pattern.to_s).gsub("%", ".*").tr("_", ".")}\\z", Regexp::IGNORECASE
+      )
       regex.match?(cell.to_s)
     end
 

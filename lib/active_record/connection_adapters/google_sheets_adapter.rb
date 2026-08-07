@@ -37,6 +37,14 @@ module ActiveRecord
         def database_exists?(config)
           true
         end
+
+        def quote_column_name(name)
+          %("#{name.to_s.gsub('"', '""')}")
+        end
+
+        def quote_table_name(name)
+          quote_column_name(name)
+        end
       end
 
       def initialize(...)
@@ -177,11 +185,11 @@ module ActiveRecord
       # -- quoting ------------------------------------------------------------
 
       def quote_column_name(name)
-        %("#{name.to_s.gsub('"', '""')}")
+        self.class.quote_column_name(name)
       end
 
       def quote_table_name(name)
-        quote_column_name(name)
+        self.class.quote_table_name(name)
       end
 
       # -- types --------------------------------------------------------------
@@ -259,9 +267,9 @@ module ActiveRecord
       end
 
       def headers_and_samples(table_name, sample_limit = 50)
-        rows = spreadsheet_client.read_rows(table_name)
+        rows = spreadsheet_client.read_rows(table_name, max_rows: sample_limit + 1)
         headers = (rows.first || []).map(&:to_s)
-        [headers, rows.drop(1).take(sample_limit)]
+        [headers, rows.drop(1)]
       end
 
       def column_position(table_name, column_name)

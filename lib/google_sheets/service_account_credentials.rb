@@ -17,7 +17,7 @@ module GoogleSheets
     EXPIRY_SKEW_SECONDS = 60
 
     def initialize(key_source)
-      key = key_source.is_a?(Hash) ? key_source : JSON.parse(File.read(key_source))
+      key = key_source.is_a?(Hash) ? key_source : read_key_file(key_source)
       @client_email = key.fetch("client_email")
       @private_key = OpenSSL::PKey::RSA.new(key.fetch("private_key"))
       @access_token = nil
@@ -36,6 +36,14 @@ module GoogleSheets
 
     private
 
+    def read_key_file(path)
+      expanded = File.expand_path(path.to_s)
+      unless File.file?(expanded) && File.readable?(expanded)
+        raise AuthenticationError, "service-account key file not found or not readable: #{expanded}"
+      end
+      JSON.parse(File.read(expanded))
+    end
+
     def fetch_token
       issued_at = Time.now.to_i
       response = Net::HTTP.post_form(
@@ -44,11 +52,19 @@ module GoogleSheets
         "assertion" => signed_assertion(issued_at)
       )
       unless response.is_a?(Net::HTTPSuccess)
-        raise AuthenticationError, "token exchange failed (#{response.code}): #{response.body}"
+        raise AuthenticationError, "token exchange failed: HTTP #{response.code} #{oauth_error_code(response)}".rstrip
       end
       payload = JSON.parse(response.body)
       @access_token = payload.fetch("access_token")
       @expires_at = Time.at(issued_at + payload.fetch("expires_in") - EXPIRY_SKEW_SECONDS)
+    end
+
+    # Surfaces only the OAuth error code, never the raw body, so identifiers
+    # echoed by the token endpoint stay out of logs and error trackers.
+    def oauth_error_code(response)
+      JSON.parse(response.body.to_s)["error"].to_s
+    rescue JSON::ParserError
+      ""
     end
 
     def signed_assertion(issued_at)

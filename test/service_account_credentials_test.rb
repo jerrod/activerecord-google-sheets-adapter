@@ -70,11 +70,19 @@ class ServiceAccountCredentialsTest < Minitest::Test
     end
   end
 
-  def test_raises_on_a_failed_exchange
+  def test_raises_on_a_failed_exchange_without_echoing_the_body
     stub_request(:post, GoogleSheets::ServiceAccountCredentials::TOKEN_URL)
-      .to_return(status: 401, body: "bad grant")
+      .to_return(status: 401, body: JSON.generate("error" => "invalid_grant", "error_description" => "account robot@secret"))
     credentials = GoogleSheets::ServiceAccountCredentials.new(@credentials_hash)
     error = assert_raises(GoogleSheets::AuthenticationError) { credentials.access_token }
-    assert_match(/401/, error.message)
+    assert_match(/401 invalid_grant/, error.message)
+    refute_match(/robot@secret/, error.message)
+  end
+
+  def test_raises_on_a_missing_key_file
+    error = assert_raises(GoogleSheets::AuthenticationError) do
+      GoogleSheets::ServiceAccountCredentials.new("/nonexistent/key.json")
+    end
+    assert_match(/not found/, error.message)
   end
 end

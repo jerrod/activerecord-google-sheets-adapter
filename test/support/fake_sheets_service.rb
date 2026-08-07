@@ -32,9 +32,10 @@ class FakeSheetsService
   def respond_to_get(request)
     path = request.uri.path
     if path.include?("/values/")
-      title = title_from(path)
+      range = URI.decode_www_form_component(path.split("/values/").last)
+      title, cell = parse_range(range)
       return not_found(title) unless @sheets.key?(title)
-      json(values_payload(title))
+      json(values_payload(title, row_bounds(cell)))
     else
       json("sheets" => @sheets.keys.map { |title|
         {"properties" => {"sheetId" => @sheet_ids[title], "title" => title}}
@@ -45,9 +46,16 @@ class FakeSheetsService
   def respond_to_post(request)
     path = request.uri.path
     body = JSON.parse(request.body)
-    if path.end_with?(":batchUpdate")
-      body.fetch("requests").each { |batch_request| apply(batch_request) }
+    if path.end_with?("/values:batchUpdate")
+      body.fetch("data").each do |entry|
+        title, cell = parse_range(entry.fetch("range"))
+        return not_found(title) unless @sheets.key?(title)
+        write_values(title, cell, entry.fetch("values"))
+      end
       json({})
+    elsif path.end_with?(":batchUpdate")
+      replies = body.fetch("requests").map { |batch_request| apply(batch_request) }
+      json("replies" => replies)
     elsif path.include?("/values/")
       title = title_from(path)
       return not_found(title) unless @sheets.key?(title)
@@ -62,12 +70,16 @@ class FakeSheetsService
     range = URI.decode_www_form_component(request.uri.path.split("/values/").last)
     title, cell = parse_range(range)
     return not_found(title) unless @sheets.key?(title)
-    column, row = parse_cell(cell)
-    JSON.parse(request.body).fetch("values").each_with_index do |values, row_offset|
-      grid_row = (@sheets[title][row - 1 + row_offset] ||= [])
-      values.each_with_index { |value, column_offset| grid_row[column - 1 + column_offset] = value }
-    end
+    write_values(title, cell, JSON.parse(request.body).fetch("values"))
     json({})
+  end
+
+  def write_values(title, cell, values)
+    column, row = parse_cell(cell)
+    values.each_with_index do |row_values, row_offset|
+      grid_row = (@sheets[title][row - 1 + row_offset] ||= [])
+      row_values.each_with_index { |value, column_offset| grid_row[column - 1 + column_offset] = value }
+    end
   end
 
   def apply(batch_request)
@@ -75,17 +87,21 @@ class FakeSheetsService
       title = add.fetch("properties").fetch("title")
       raise "sheet #{title} already exists" if @sheets.key?(title)
       seed(title, [])
+      {"addSheet" => {"properties" => {"sheetId" => @sheet_ids[title], "title" => title}}}
     elsif (drop = batch_request["deleteSheet"])
       title = title_for_id(drop.fetch("sheetId"))
       @sheets.delete(title)
       @sheet_ids.delete(title)
+      {}
     elsif (rename = batch_request["updateSheetProperties"])
       properties = rename.fetch("properties")
       title = title_for_id(properties.fetch("sheetId"))
       @sheets[properties.fetch("title")] = @sheets.delete(title)
       @sheet_ids[properties.fetch("title")] = @sheet_ids.delete(title)
+      {}
     elsif (deletion = batch_request["deleteDimension"])
       apply_delete_dimension(deletion.fetch("range"))
+      {}
     else
       raise "unsupported batchUpdate request: #{batch_request.keys}"
     end
@@ -102,10 +118,17 @@ class FakeSheetsService
     end
   end
 
-  def values_payload(title)
+  def values_payload(title, bounds)
     rows = @sheets[title]
+    rows = rows.take(bounds) if bounds
     trimmed = rows.reverse.drop_while { |row| row.all? { |cell| blank?(cell) } }.reverse
     trimmed.empty? ? {"range" => title} : {"range" => title, "values" => trimmed}
+  end
+
+  # "1:51" limits a read to the first 51 rows; a blank cell reference reads everything.
+  def row_bounds(cell)
+    match = /\A(\d+):(\d+)\z/.match(cell)
+    match && Integer(match[2])
   end
 
   def blank?(cell)

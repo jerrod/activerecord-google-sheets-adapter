@@ -22,8 +22,11 @@ class AdapterTest < Minitest::Test
     Contact.reset_column_information
   end
 
+  # super runs WebMock's teardown alias, which resets the stub registry and
+  # request history between tests.
   def teardown
     ActiveRecord::Base.remove_connection
+    super
   end
 
   def connection
@@ -152,10 +155,18 @@ class AdapterTest < Minitest::Test
     assert_equal 3, Contact.count
   end
 
-  def test_update_all_touches_every_matching_row
+  def test_update_all_touches_every_matching_row_in_one_request
     updated = Contact.where(active: true).update_all(active: false)
     assert_equal 2, updated
     assert_equal 0, Contact.where(active: true).count
+    assert_requested :post, %r{/values:batchUpdate}, times: 1
+  end
+
+  def test_insert_all_appends_every_row_in_one_request
+    Contact.insert_all!([{name: "Annie Easley"}, {name: "Mary Jackson"}])
+    assert_equal 5, Contact.count
+    assert_equal [4, 5], Contact.order(:id).last(2).map(&:id)
+    assert_requested :post, %r{/values/.*:append}, times: 1
   end
 
   def test_destroy_removes_the_row
