@@ -1,10 +1,13 @@
-module GoogleSheets
-  class UnsupportedStatement < StandardError; end
+require_relative "statement_tokenizer"
+require_relative "predicate_grammar"
 
+module GoogleSheets
   # Parses the SQL subset that ActiveRecord generates for simple CRUD:
   # SELECT (columns, COUNT, ORDER BY, LIMIT, OFFSET), INSERT, UPDATE, DELETE,
   # and WHERE trees built from =, !=, <, <=, >, >=, LIKE, IN, IS NULL, AND, OR, NOT.
   class StatementParser
+    include PredicateGrammar
+
     Select = Struct.new(:table, :projections, :where, :order, :limit, :offset)
     Insert = Struct.new(:table, :columns, :rows)
     Update = Struct.new(:table, :assignments, :where)
@@ -14,15 +17,13 @@ module GoogleSheets
     Predicate = Struct.new(:operator, :column, :value, :children)
     Ordering = Struct.new(:column, :descending)
 
-    Token = Struct.new(:type, :value) # :word, :identifier, :string, :number, :symbol
-
     def self.parse(sql)
       new(sql).parse
     end
 
     def initialize(sql)
       @sql = sql
-      @tokens = tokenize(sql)
+      @tokens = StatementTokenizer.tokenize(sql)
       @position = 0
     end
 
@@ -152,75 +153,6 @@ module GoogleSheets
       orderings
     end
 
-    # -- expressions --------------------------------------------------------
-
-    def parse_expression
-      node = parse_term
-      while take_word("OR")
-        node = Predicate.new(operator: :or, children: [node, parse_term])
-      end
-      node
-    end
-
-    def parse_term
-      node = parse_factor
-      while take_word("AND")
-        node = Predicate.new(operator: :and, children: [node, parse_factor])
-      end
-      node
-    end
-
-    def parse_factor
-      if take_word("NOT")
-        return Predicate.new(operator: :not, children: [parse_factor])
-      end
-      if peek&.type == :symbol && peek.value == "("
-        advance
-        node = parse_expression
-        expect_symbol(")")
-        return node
-      end
-      parse_comparison
-    end
-
-    def parse_comparison
-      column = expect_column_reference
-      if take_word("IS")
-        negated = take_word("NOT")
-        expect_word("NULL")
-        return Predicate.new(operator: negated ? :not_null : :is_null, column: column)
-      end
-      negated = take_word("NOT")
-      if take_word("IN")
-        expect_symbol("(")
-        values = parse_literal_list
-        expect_symbol(")")
-        Predicate.new(operator: negated ? :not_in : :in, column: column, value: values)
-      elsif take_word("LIKE")
-        Predicate.new(operator: negated ? :not_like : :like, column: column, value: expect_literal)
-      elsif negated
-        unsupported("expected IN or LIKE after NOT")
-      else
-        operator = expect_comparison_operator
-        Predicate.new(operator: operator, column: column, value: expect_literal)
-      end
-    end
-
-    def expect_comparison_operator
-      token = peek
-      unsupported("expected a comparison operator, got #{describe(token)}") unless token&.type == :symbol
-      advance
-      case token.value
-      when "=" then :eq
-      when "!=", "<>" then :neq
-      when ">" then :gt
-      when ">=" then :gte
-      when "<" then :lt
-      when "<=" then :lte
-      else unsupported("unsupported operator #{token.value}")
-      end
-    end
-
     # -- token helpers ------------------------------------------------------
 
     def parse_identifier_list
@@ -329,45 +261,6 @@ module GoogleSheets
 
     def unsupported(message)
       raise UnsupportedStatement, "#{message} — the google_sheets adapter supports simple CRUD SQL only (statement: #{@sql})"
-    end
-
-    # -- tokenizer ----------------------------------------------------------
-
-    TOKEN_PATTERN = /\s*(?:
-      "((?:[^"]|"")*)"            # 1: double-quoted identifier
-      |'((?:[^']|'')*)'           # 2: single-quoted string
-      |(-?\d+\.\d+)               # 3: float
-      |(-?\d+)                    # 4: integer
-      |([A-Za-z_][A-Za-z_0-9]*)   # 5: bare word
-      |(<=|>=|!=|<>|[(),=<>*.])   # 6: symbol
-    )/x
-
-    def tokenize(sql)
-      tokens = []
-      scanner = sql.strip
-      until scanner.empty?
-        match = TOKEN_PATTERN.match(scanner)
-        unsupported("cannot tokenize near #{scanner[0, 20].inspect}") if match.nil? || match.begin(0) != 0
-        tokens << build_token(match)
-        scanner = scanner[match.end(0)..].to_s.lstrip
-      end
-      tokens
-    end
-
-    def build_token(match)
-      if match[1]
-        Token.new(:identifier, match[1].gsub('""', '"'))
-      elsif match[2]
-        Token.new(:string, match[2].gsub("''", "'"))
-      elsif match[3]
-        Token.new(:number, Float(match[3]))
-      elsif match[4]
-        Token.new(:number, Integer(match[4]))
-      elsif match[5]
-        Token.new(:word, match[5].upcase)
-      else
-        Token.new(:symbol, match[6])
-      end
     end
   end
 end

@@ -61,7 +61,9 @@ end
 | record | one row, from row 2 down |
 | primary key | an `id` column; the adapter assigns `max(id) + 1` on insert |
 
-The adapter infers each column type from the data in the first 50 rows, which it reads with one bounded request. Records the adapter writes store dates and datetimes as ISO strings. A date-typed cell a human entered reads back as the sheet's displayed text. It detects integers, floats, booleans, `YYYY-MM-DD` dates, and datetime strings. Everything else reads as a string. Declare `attribute :premium, :decimal` in a model when you need a specific cast. A blank cell reads as `NULL`.
+The adapter infers each column type from the data in the first 50 rows, which it reads with one bounded request. It detects integers, floats, booleans, `YYYY-MM-DD` dates, and datetime strings. Everything else reads as a string.
+
+Records the adapter writes store dates and datetimes as ISO strings. A date-typed cell a human entered reads back as the sheet's displayed text. Declare `attribute :premium, :decimal` in a model when you need a specific cast. A blank cell reads as `NULL`.
 
 ## Supported queries
 
